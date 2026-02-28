@@ -458,6 +458,8 @@ namespace cAlgo
             public IntensityMode_Data IntensityMode_Input = IntensityMode_Data.Per_Bar;
             public int IntensityNDays_Input = 1;
             public Dictionary<int, double> BarMaxDeltaCache = new Dictionary<int, double>();
+            public Dictionary<int, double> BarMaxVolumeCache = new Dictionary<int, double>();
+            public Dictionary<int, double> BarMaxBuySellCache = new Dictionary<int, double>();
         }
         public GeneralParams_Info GeneralParams = new();
 
@@ -1836,7 +1838,7 @@ namespace cAlgo
             }
 
             IEnumerable<int> negativeList = new List<int>();
-            double finalMaxDelta = 1;
+            double finalMaxForIntensity = 1;
             if (GeneralParams.VolumeMode_Input == VolumeMode_Data.Delta)
             {
                 negativeList = DeltaRank.Values.Where(n => n < 0);
@@ -1846,21 +1848,69 @@ namespace cAlgo
                 double currentBarMaxDelta = Math.Max(posMax, negMax);
                 
                 GeneralParams.BarMaxDeltaCache[iStart] = currentBarMaxDelta;
-                finalMaxDelta = currentBarMaxDelta;
+                finalMaxForIntensity = currentBarMaxDelta;
 
                 if (GeneralParams.IntensityMode_Input != IntensityMode_Data.Per_Bar)
                 {
                     if (GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_N_Days) {
                         DateTime cutoffTime = Bars.OpenTimes[iStart].AddDays(-GeneralParams.IntensityNDays_Input);
                         foreach (var kvp in GeneralParams.BarMaxDeltaCache) {
-                            if (Bars.OpenTimes[kvp.Key] >= cutoffTime && kvp.Value > finalMaxDelta) {
-                                finalMaxDelta = kvp.Value;
+                            if (Bars.OpenTimes[kvp.Key] >= cutoffTime && kvp.Value > finalMaxForIntensity) {
+                                finalMaxForIntensity = kvp.Value;
                             }
                         }
                     } else if (GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_Lookback) {
                         foreach (var val in GeneralParams.BarMaxDeltaCache.Values) {
-                            if (val > finalMaxDelta) {
-                                finalMaxDelta = val;
+                            if (val > finalMaxForIntensity) {
+                                finalMaxForIntensity = val;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (GeneralParams.VolumeMode_Input == VolumeMode_Data.Normal)
+            {
+                double currentBarMax = maxValue;
+                GeneralParams.BarMaxVolumeCache[iStart] = currentBarMax;
+                finalMaxForIntensity = currentBarMax;
+
+                if (GeneralParams.IntensityMode_Input != IntensityMode_Data.Per_Bar)
+                {
+                    if (GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_N_Days) {
+                        DateTime cutoffTime = Bars.OpenTimes[iStart].AddDays(-GeneralParams.IntensityNDays_Input);
+                        foreach (var kvp in GeneralParams.BarMaxVolumeCache) {
+                            if (Bars.OpenTimes[kvp.Key] >= cutoffTime && kvp.Value > finalMaxForIntensity) {
+                                finalMaxForIntensity = kvp.Value;
+                            }
+                        }
+                    } else if (GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_Lookback) {
+                        foreach (var val in GeneralParams.BarMaxVolumeCache.Values) {
+                            if (val > finalMaxForIntensity) {
+                                finalMaxForIntensity = val;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (GeneralParams.VolumeMode_Input == VolumeMode_Data.Buy_Sell)
+            {
+                double currentBarMax = Math.Max(buyMax, sellMax);
+                GeneralParams.BarMaxBuySellCache[iStart] = currentBarMax;
+                finalMaxForIntensity = currentBarMax;
+
+                if (GeneralParams.IntensityMode_Input != IntensityMode_Data.Per_Bar)
+                {
+                    if (GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_N_Days) {
+                        DateTime cutoffTime = Bars.OpenTimes[iStart].AddDays(-GeneralParams.IntensityNDays_Input);
+                        foreach (var kvp in GeneralParams.BarMaxBuySellCache) {
+                            if (Bars.OpenTimes[kvp.Key] >= cutoffTime && kvp.Value > finalMaxForIntensity) {
+                                finalMaxForIntensity = kvp.Value;
+                            }
+                        }
+                    } else if (GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_Lookback) {
+                        foreach (var val in GeneralParams.BarMaxBuySellCache.Values) {
+                            if (val > finalMaxForIntensity) {
+                                finalMaxForIntensity = val;
                             }
                         }
                     }
@@ -1934,6 +1984,15 @@ namespace cAlgo
                     }
 
                     Color colorHist = currentVolume != maxVolume ? VolumeColor : VolumeLargeColor;
+
+                    if (GeneralParams.ColoringIntensity && finalMaxForIntensity > 0)
+                    {
+                        double ratio = (double)currentVolume / finalMaxForIntensity;
+                        if (ratio > 1) ratio = 1.0;
+                        double minAlpha = 30;
+                        byte newAlpha = (byte)(minAlpha + (255 - minAlpha) * ratio);
+                        colorHist = Color.FromArgb(newAlpha, colorHist.R, colorHist.G, colorHist.B);
+                    }
 
                     DrawOrCache(new DrawInfo
                     {
@@ -2021,6 +2080,19 @@ namespace cAlgo
                     Color buyColor = dividedCondition ? buyDividedColor : BuyColor;
                     Color sellColor = dividedCondition ? sellDividedColor : SellColor;
 
+                    if (GeneralParams.ColoringIntensity && finalMaxForIntensity > 0)
+                    {
+                        double buyRatio = (double)currentBuy / finalMaxForIntensity;
+                        if (buyRatio > 1) buyRatio = 1.0;
+                        double sellRatio = (double)currentSell / finalMaxForIntensity;
+                        if (sellRatio > 1) sellRatio = 1.0;
+                        double minAlpha = 30;
+                        byte newBuyAlpha = (byte)(minAlpha + (255 - minAlpha) * buyRatio);
+                        byte newSellAlpha = (byte)(minAlpha + (255 - minAlpha) * sellRatio);
+                        buyColor = Color.FromArgb(newBuyAlpha, buyColor.R, buyColor.G, buyColor.B);
+                        sellColor = Color.FromArgb(newSellAlpha, sellColor.R, sellColor.G, sellColor.B);
+                    }
+
                     // Sell histogram first, Buy histogram to override it.
                     DrawOrCache(new DrawInfo
                     {
@@ -2047,7 +2119,7 @@ namespace cAlgo
                     });
                 }
 
-                void DrawRectangle_Delta(int currentDelta, int positiveDeltaMax, IEnumerable<int> negativeDeltaList, double finalMaxDelta)
+                void DrawRectangle_Delta(int currentDelta, int positiveDeltaMax, IEnumerable<int> negativeDeltaList, double finalMaxForIntensity)
                 {
                     int negativeDeltaMax = negativeDeltaList.Any() ? Math.Abs(negativeDeltaList.Min()) : 0;
 
@@ -2111,9 +2183,9 @@ namespace cAlgo
 
                     Color colorHist = currentDelta > 0 ? buyColorWithFilter : sellColorWithFilter;
 
-                    if (GeneralParams.ColoringIntensity && finalMaxDelta > 0)
+                    if (GeneralParams.ColoringIntensity && finalMaxForIntensity > 0)
                     {
-                        double ratio = Math.Abs((double)currentDelta) / finalMaxDelta;
+                        double ratio = Math.Abs((double)currentDelta) / finalMaxForIntensity;
                         if (ratio > 1) ratio = 1.0;
 
                         double minAlpha = 30; // 30/255 = ~12% minimum opacity
@@ -2211,7 +2283,7 @@ namespace cAlgo
                     {
                         int deltaValue = DeltaRank[priceKey];
                         if (MiscParams.ShowHist)
-                            DrawRectangle_Delta(deltaValue, maxValue, negativeList, finalMaxDelta);
+                            DrawRectangle_Delta(deltaValue, maxValue, negativeList, finalMaxForIntensity);
 
                         if (MiscParams.ShowNumbers)
                         {
@@ -6830,6 +6902,8 @@ namespace cAlgo
             // It's needed since TF_idx(start) changes if SegmentsInterval_Input is switched on the panel
             Segments_VP.Clear();
             GeneralParams.BarMaxDeltaCache.Clear();
+            GeneralParams.BarMaxVolumeCache.Clear();
+            GeneralParams.BarMaxBuySellCache.Clear();
             segmentInfo.Clear(); 
             // Reset Fixed Range
             foreach (ChartRectangle rect in RangeObjs.rectangles)
@@ -7108,7 +7182,7 @@ namespace cAlgo
                     InputType = ParamInputType.Checkbox,
                     GetDefault = p => p.GeneralParams.ColoringIntensity,
                     OnChanged = _ => UpdateCheckbox("IntensityKey", val => Outside.GeneralParams.ColoringIntensity = val, true),
-                    IsVisible = () => isNot_NormalMode() && IsNot_BubblesChart() && isPanel_ODF()
+                    IsVisible = () => IsNot_BubblesChart() && isPanel_ODF()
                 },
                 new()
                 {
@@ -7120,7 +7194,7 @@ namespace cAlgo
                     GetDefault = p => p.GeneralParams.IntensityMode_Input.ToString(),
                     EnumOptions = () => Enum.GetNames(typeof(IntensityMode_Data)),
                     OnChanged = _ => UpdateIntensityMode(),
-                    IsVisible = () => isNot_NormalMode() && Outside.GeneralParams.ColoringIntensity && IsNot_BubblesChart() && isPanel_ODF()
+                    IsVisible = () => Outside.GeneralParams.ColoringIntensity && IsNot_BubblesChart() && isPanel_ODF()
                 },
                 new()
                 {
@@ -7131,7 +7205,7 @@ namespace cAlgo
                     InputType = ParamInputType.Text,
                     GetDefault = p => p.GeneralParams.IntensityNDays_Input.ToString("0.############################", CultureInfo.InvariantCulture),
                     OnChanged = _ => UpdateIntensityNDays(),
-                    IsVisible = () => isNot_NormalMode() && Outside.GeneralParams.ColoringIntensity && Outside.GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_N_Days && IsNot_BubblesChart() && isPanel_ODF()
+                    IsVisible = () => Outside.GeneralParams.ColoringIntensity && Outside.GeneralParams.IntensityMode_Input == IntensityMode_Data.Global_N_Days && IsNot_BubblesChart() && isPanel_ODF()
                 },
                 new()
                 {
