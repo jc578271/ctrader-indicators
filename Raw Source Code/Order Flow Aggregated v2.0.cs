@@ -136,13 +136,22 @@ using System.Threading;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Text.Json;
+using System.Text;
 
 namespace cAlgo
 {
-    // Keep the ODF_Ticks class name so that both versions can be interchangeable.
-    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    // Appended _Exporter
+    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.FullAccess)]
     public class OrderFlowTicksV20 : Indicator
     {
+        private TcpClient _tcpClient;
+        private NetworkStream _tcpStream;
+
+        [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
+        public bool ExportHistory { get; set; }
+
         public enum LoadTickFrom_Data
         {
             Today,
@@ -1271,6 +1280,14 @@ namespace cAlgo
 
         protected override void Initialize()
         {
+            try {
+                _tcpClient = new TcpClient("127.0.0.1", 5555);
+                _tcpStream = _tcpClient.GetStream();
+                Print("Successfully connected to Python Socket (OrderFlow Exporter)");
+            } catch (Exception ex) {
+                Print("Socket Error: " + ex.Message);
+            }
+
             if (RowConfig_Input == RowConfig_Data.Custom)
                 heightPips = CustomHeightInPips;
             else {
@@ -3407,6 +3424,31 @@ namespace cAlgo
 
                     break;
                 }
+            }
+
+            // TCP SOCKET EXPORT LOGIC 
+            if (_tcpClient != null && _tcpClient.Connected && (ExportHistory || IsLastBar))
+            {
+                try {
+                    var exportData = new {
+                        type = "order_flow_aggregated",
+                        symbol = Symbol.Name,
+                        timeframe = Chart.TimeFrame.ShortName,
+                        timestamp = Bars.OpenTimes[iStart].ToString("o"),
+                        open = Bars.OpenPrices[iStart],
+                        high = Bars.HighPrices[iStart],
+                        low = Bars.LowPrices[iStart],
+                        close = Bars.ClosePrices[iStart],
+                        volumesRank = VolumesRank,
+                        volumesRankUp = VolumesRank_Up,
+                        volumesRankDown = VolumesRank_Down,
+                        deltaRank = DeltaRank,
+                        minMaxDelta = MinMaxDelta
+                    };
+                    string jsonString = JsonSerializer.Serialize(exportData) + "\n";
+                    byte[] dataBytes = Encoding.UTF8.GetBytes(jsonString);
+                    _tcpStream.Write(dataBytes, 0, dataBytes.Length);
+                } catch (Exception) { }
             }
         }
 

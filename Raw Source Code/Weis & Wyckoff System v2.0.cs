@@ -74,12 +74,25 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Text.Json;
+using System.Text;
 
 namespace cAlgo
 {
-    [Indicator(IsOverlay = true, AutoRescale = true, AccessRights = AccessRights.None)]
+    [Indicator(IsOverlay = true, AutoRescale = true, AccessRights = AccessRights.FullAccess)]
     public class WeisWyckoffSystemV20 : Indicator
     {
+        private TcpClient _tcpClient;
+        private NetworkStream _networkStream;
+
+        private double _expCumulVolume;
+        private double _expCumulPrice;
+        private double _expCumulVolPrice;
+        private string _expWaveDirection = "None";
+
+        [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
+        public bool ExportHistory { get; set; }
         public enum LoadTickFrom_Data
         {
             Today,
@@ -676,6 +689,11 @@ namespace cAlgo
 
         protected override void Initialize()
         {
+            try {
+                _tcpClient = new TcpClient("127.0.0.1", 5555);
+                _networkStream = _tcpClient.GetStream();
+            } catch { Print("Python Socket Server not running at 127.0.0.1:5555"); }
+
             string currentTimeframe = Chart.TimeFrame.ToString();
             BooleanUtils.isRenkoChart = currentTimeframe.Contains("Renko");
             BooleanUtils.isTickChart = currentTimeframe.Contains("Tick");
@@ -851,6 +869,39 @@ namespace cAlgo
             // ==== Renko Wicks ====
             if (ShowWicks && BooleanUtils.isRenkoChart)
                 RenkoWicks(index);
+
+            if (ExportHistory || IsLastBar)
+            {
+                try
+                {
+                    double vol = double.IsNaN(VolumeSeries[index]) ? 0 : VolumeSeries[index];
+                    double time = double.IsNaN(TimeSeries[index]) ? 0 : TimeSeries[index];
+                    double zigzag = double.IsNaN(ZigZagBuffer[index]) ? 0 : ZigZagBuffer[index];
+
+                    var exportData = new
+                    {
+                        symbol = Symbol.Name,
+                        timeframe = Chart.TimeFrame.ShortName,
+                        timestamp = Bars.OpenTimes[index].ToString("o"),
+                        open = Bars.OpenPrices[index],
+                        high = Bars.HighPrices[index],
+                        low = Bars.LowPrices[index],
+                        close = Bars.ClosePrices[index],
+                        wyckoffVolume = vol,
+                        wyckoffTime = time,
+                        zigZag = zigzag,
+                        waveVolume = _expCumulVolume,
+                        wavePrice = _expCumulPrice,
+                        waveVolPrice = _expCumulVolPrice,
+                        waveDirection = _expWaveDirection
+                    };
+
+                    string jsonString = JsonSerializer.Serialize(exportData);
+                    byte[] data = Encoding.UTF8.GetBytes(jsonString + "\n");
+                    _networkStream?.Write(data, 0, data.Length);
+                }
+                catch { }
+            }
         }
 
         private void Design_Templates() {
@@ -2388,6 +2439,11 @@ namespace cAlgo
             double cumlVolume = cumulVolume();
             double cumlRenkoOrPrice = BooleanUtils.isRenkoChart ? cumulRenko() : cumulativePrice(directionIsUp);
             double cumlVolPrice = Math.Round(cumlVolume / cumlRenkoOrPrice, 1);
+
+            _expCumulVolume = cumlVolume;
+            _expCumulPrice = cumlRenkoOrPrice;
+            _expCumulVolPrice = cumlVolPrice;
+            _expWaveDirection = directionIsUp ? "Up" : "Down";
 
             // Standard Waves
             if (!WavesParams.ShowCurrentWave && directionChanged || WavesParams.ShowCurrentWave) {

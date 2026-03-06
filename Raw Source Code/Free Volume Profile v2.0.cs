@@ -69,12 +69,21 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
+using System.Net.Sockets;
+using System.Text.Json;
+using System.Text;
 
 namespace cAlgo
 {
-    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.FullAccess)]
     public class FreeVolumeProfileV20 : Indicator
     {
+        private TcpClient _tcpClient;
+        private NetworkStream _networkStream;
+
+        [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
+        public bool ExportHistory { get; set; }
+
         public enum PanelAlign_Data
         {
             Top_Left,
@@ -668,6 +677,11 @@ namespace cAlgo
 
         protected override void Initialize()
         {
+            try {
+                _tcpClient = new TcpClient("127.0.0.1", 5555);
+                _networkStream = _tcpClient.GetStream();
+            } catch { Print("Python Socket Server not running at 127.0.0.1:5555"); }
+
             // ========== Predefined Config ==========
             if (RowConfig_Input == RowConfig_Data.ATR && (Chart.TimeFrame >= TimeFrame.Minute && Chart.TimeFrame <= TimeFrame.Day3))
             {
@@ -893,6 +907,54 @@ namespace cAlgo
                     LoadMoreHistory_IfNeeded();
                     isEndChart = true;
                 }
+            }
+
+            // === Export Volume Profile data to Python ===
+            if (ExportHistory || IsLastBar)
+            {
+                try
+                {
+                    double pocPrice = 0;
+                    double vahPrice = 0;
+                    double valPrice = 0;
+                    double totalVolume = 0;
+
+                    if (VP_VolumesRank.Count > 0)
+                    {
+                        totalVolume = VP_VolumesRank.Values.Sum();
+                        double maxVol = VP_VolumesRank.Values.Max();
+                        pocPrice = VP_VolumesRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
+
+                        double[] vaResult = VA_Calculation(VP_VolumesRank);
+                        if (vaResult.Length >= 3)
+                        {
+                            valPrice = vaResult[0];
+                            vahPrice = vaResult[1];
+                            pocPrice = vaResult[2];
+                        }
+                    }
+
+                    var exportData = new
+                    {
+                        symbol = Symbol.Name,
+                        timeframe = Chart.TimeFrame.ShortName,
+                        timestamp = Bars.OpenTimes[index].ToString("o"),
+                        open = Bars.OpenPrices[index],
+                        high = Bars.HighPrices[index],
+                        low = Bars.LowPrices[index],
+                        close = Bars.ClosePrices[index],
+                        vpPOC = pocPrice,
+                        vpVAH = vahPrice,
+                        vpVAL = valPrice,
+                        vpTotalVolume = totalVolume,
+                        vpProfileCount = VP_VolumesRank.Count
+                    };
+
+                    string jsonString = JsonSerializer.Serialize(exportData);
+                    byte[] data = Encoding.UTF8.GetBytes(jsonString + "\n");
+                    _networkStream?.Write(data, 0, data.Length);
+                }
+                catch { }
             }
         }
 
