@@ -912,51 +912,58 @@ namespace cAlgo
             // === Export Volume Profile data to Python ===
             if (ExportHistory || IsLastBar)
             {
-                try
-                {
-                    double pocPrice = 0;
-                    double vahPrice = 0;
-                    double valPrice = 0;
-                    double totalVolume = 0;
-
-                    if (VP_VolumesRank.Count > 0)
-                    {
-                        totalVolume = VP_VolumesRank.Values.Sum();
-                        double maxVol = VP_VolumesRank.Values.Max();
-                        pocPrice = VP_VolumesRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
-
-                        double[] vaResult = VA_Calculation(VP_VolumesRank);
-                        if (vaResult.Length >= 3)
-                        {
-                            valPrice = vaResult[0];
-                            vahPrice = vaResult[1];
-                            pocPrice = vaResult[2];
-                        }
-                    }
-
-                    var exportData = new
-                    {
-                        symbol = Symbol.Name,
-                        timeframe = Chart.TimeFrame.ShortName,
-                        timestamp = Bars.OpenTimes[index].ToString("o"),
-                        open = Bars.OpenPrices[index],
-                        high = Bars.HighPrices[index],
-                        low = Bars.LowPrices[index],
-                        close = Bars.ClosePrices[index],
-                        vpPOC = pocPrice,
-                        vpVAH = vahPrice,
-                        vpVAL = valPrice,
-                        vpTotalVolume = totalVolume,
-                        vpProfileCount = VP_VolumesRank.Count
-                    };
-
-                    string jsonString = JsonSerializer.Serialize(exportData);
-                    byte[] data = Encoding.UTF8.GetBytes(jsonString + "\n");
-                    _networkStream?.Write(data, 0, data.Length);
-                }
-                catch { }
+                SendSocketData(index);
             }
         }
+
+        public void SendSocketData(int index)
+        {
+            try
+            {
+                double pocPrice = 0;
+                double vahPrice = 0;
+                double valPrice = 0;
+                double totalVolume = 0;
+
+                if (VP_VolumesRank.Count > 0)
+                {
+                    totalVolume = VP_VolumesRank.Values.Sum();
+                    double maxVol = VP_VolumesRank.Values.Max();
+                    pocPrice = VP_VolumesRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
+
+                    double[] vaResult = VA_Calculation(VP_VolumesRank);
+                    if (vaResult.Length >= 3)
+                    {
+                        valPrice = vaResult[0];
+                        vahPrice = vaResult[1];
+                        pocPrice = vaResult[2];
+                    }
+                }
+
+                var exportData = new
+                {
+                    symbol = Symbol.Name,
+                    timeframe = Chart.TimeFrame.ShortName,
+                    timestamp = Bars.OpenTimes[index].ToString("o"),
+                    open = Bars.OpenPrices[index],
+                    high = Bars.HighPrices[index],
+                    low = Bars.LowPrices[index],
+                    close = Bars.ClosePrices[index],
+                    vpPOC = pocPrice,
+                    vpVAH = vahPrice,
+                    vpVAL = valPrice,
+                    vpTotalVolume = totalVolume,
+                    vpProfileCount = VP_VolumesRank.Count,
+                    spread = Symbol.Spread
+                };
+
+                string jsonString = JsonSerializer.Serialize(exportData);
+                byte[] data = Encoding.UTF8.GetBytes(jsonString + "\n");
+                _networkStream?.Write(data, 0, data.Length);
+            }
+            catch { }
+        }
+
 
         private void CleanUp_MainVP(int index, int startIndex)
         {

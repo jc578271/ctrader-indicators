@@ -872,36 +872,42 @@ namespace cAlgo
 
             if (ExportHistory || IsLastBar)
             {
-                try
-                {
-                    double vol = double.IsNaN(VolumeSeries[index]) ? 0 : VolumeSeries[index];
-                    double time = double.IsNaN(TimeSeries[index]) ? 0 : TimeSeries[index];
-                    double zigzag = double.IsNaN(ZigZagBuffer[index]) ? 0 : ZigZagBuffer[index];
-
-                    var exportData = new
-                    {
-                        symbol = Symbol.Name,
-                        timeframe = Chart.TimeFrame.ShortName,
-                        timestamp = Bars.OpenTimes[index].ToString("o"),
-                        open = Bars.OpenPrices[index],
-                        high = Bars.HighPrices[index],
-                        low = Bars.LowPrices[index],
-                        close = Bars.ClosePrices[index],
-                        wyckoffVolume = vol,
-                        wyckoffTime = time,
-                        zigZag = zigzag,
-                        waveVolume = _expCumulVolume,
-                        wavePrice = _expCumulPrice,
-                        waveVolPrice = _expCumulVolPrice,
-                        waveDirection = _expWaveDirection
-                    };
-
-                    string jsonString = JsonSerializer.Serialize(exportData);
-                    byte[] data = Encoding.UTF8.GetBytes(jsonString + "\n");
-                    _networkStream?.Write(data, 0, data.Length);
-                }
-                catch { }
+                SendSocketData(index);
             }
+        }
+
+        public void SendSocketData(int index)
+        {
+            double vol = double.IsNaN(VolumeSeries[index]) ? 0 : VolumeSeries[index];
+            try
+            {
+                double time = double.IsNaN(TimeSeries[index]) ? 0 : TimeSeries[index];
+                double zigzag = double.IsNaN(ZigZagBuffer[index]) ? 0 : ZigZagBuffer[index];
+
+                var exportData = new
+                {
+                    symbol = Symbol.Name,
+                    timeframe = Chart.TimeFrame.ShortName,
+                    timestamp = Bars.OpenTimes[index].ToString("o"),
+                    open = Bars.OpenPrices[index],
+                    high = Bars.HighPrices[index],
+                    low = Bars.LowPrices[index],
+                    close = Bars.ClosePrices[index],
+                    wyckoffVolume = vol,
+                    wyckoffTime = time,
+                    zigZag = zigzag,
+                    waveVolume = _expCumulVolume,
+                    wavePrice = _expCumulPrice,
+                    waveVolPrice = _expCumulVolPrice,
+                    waveDirection = _expWaveDirection,
+                    spread = Symbol.Spread
+                };
+
+                string jsonString = JsonSerializer.Serialize(exportData) + "\n";
+                byte[] data = Encoding.UTF8.GetBytes(jsonString);
+                _networkStream.Write(data, 0, data.Length);
+            }
+            catch { }
         }
 
         private void Design_Templates() {

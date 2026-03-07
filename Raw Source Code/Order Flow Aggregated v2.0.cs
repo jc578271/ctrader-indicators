@@ -1602,21 +1602,51 @@ namespace cAlgo
                         LiveVP_Concurrent(index, indexStart);
                 }
             }
+        }
 
-            void CreateOrderFlow(int idx)
+        void CreateOrderFlow(int idx)
+        {
+            VolumesRank.Clear();
+            VolumesRank_Up.Clear();
+            VolumesRank_Down.Clear();
+            DeltaRank.Clear();
+            int[] resetDelta = {0, 0};
+            MinMaxDelta = resetDelta;
+            OrderFlow(idx);
+        }
+        void lockNotifyInPriceBased(bool value) {
+            BooleanLocks.spikeNotify = value;
+            BooleanLocks.ultraNotify = !value;
+        }
+        public void SendSocketData(int iStart)
+        {
+            // Filter out empty bars: only send if volume profile data exists
+            if (VolumesRank == null || VolumesRank.Count == 0) return;
+
+            try
             {
-                VolumesRank.Clear();
-                VolumesRank_Up.Clear();
-                VolumesRank_Down.Clear();
-                DeltaRank.Clear();
-                int[] resetDelta = {0, 0};
-                MinMaxDelta = resetDelta;
-                OrderFlow(idx);
+                var exportData = new
+                {
+                    type = "order_flow_aggregated",
+                    symbol = Symbol.Name,
+                    timeframe = Chart.TimeFrame.ShortName,
+                    timestamp = Bars.OpenTimes[iStart].ToString("o"),
+                    open = Bars.OpenPrices[iStart],
+                    high = Bars.HighPrices[iStart],
+                    low = Bars.LowPrices[iStart],
+                    close = Bars.ClosePrices[iStart],
+                    volumesRank = VolumesRank,
+                    volumesRankUp = VolumesRank_Up,
+                    volumesRankDown = VolumesRank_Down,
+                    deltaRank = DeltaRank,
+                    minMaxDelta = MinMaxDelta,
+                    spread = Symbol.Spread
+                };
+                string jsonString = JsonSerializer.Serialize(exportData) + "\n";
+                byte[] dataBytes = Encoding.UTF8.GetBytes(jsonString);
+                _tcpStream.Write(dataBytes, 0, dataBytes.Length);
             }
-            void lockNotifyInPriceBased(bool value) {
-                BooleanLocks.spikeNotify = value;
-                BooleanLocks.ultraNotify = !value;
-            }
+            catch (Exception) { }
         }
 
         private void MassiveCleanUp(int indexStart, int index) {
@@ -3427,28 +3457,9 @@ namespace cAlgo
             }
 
             // TCP SOCKET EXPORT LOGIC 
-            if (_tcpClient != null && _tcpClient.Connected && (ExportHistory || IsLastBar))
+            if (ExportHistory || IsLastBar)
             {
-                try {
-                    var exportData = new {
-                        type = "order_flow_aggregated",
-                        symbol = Symbol.Name,
-                        timeframe = Chart.TimeFrame.ShortName,
-                        timestamp = Bars.OpenTimes[iStart].ToString("o"),
-                        open = Bars.OpenPrices[iStart],
-                        high = Bars.HighPrices[iStart],
-                        low = Bars.LowPrices[iStart],
-                        close = Bars.ClosePrices[iStart],
-                        volumesRank = VolumesRank,
-                        volumesRankUp = VolumesRank_Up,
-                        volumesRankDown = VolumesRank_Down,
-                        deltaRank = DeltaRank,
-                        minMaxDelta = MinMaxDelta
-                    };
-                    string jsonString = JsonSerializer.Serialize(exportData) + "\n";
-                    byte[] dataBytes = Encoding.UTF8.GetBytes(jsonString);
-                    _tcpStream.Write(dataBytes, 0, dataBytes.Length);
-                } catch (Exception) { }
+                SendSocketData(iStart);
             }
         }
 
