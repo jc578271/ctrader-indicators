@@ -942,6 +942,7 @@ namespace cAlgo
 
                 var exportData = new
                 {
+                    type = "volume_profile",
                     symbol = Symbol.Name,
                     timeframe = Chart.TimeFrame.ShortName,
                     timestamp = Bars.OpenTimes[index].ToString("o"),
@@ -953,7 +954,11 @@ namespace cAlgo
                     vpVAH = vahPrice,
                     vpVAL = valPrice,
                     vpTotalVolume = totalVolume,
-                    vpProfileCount = VP_VolumesRank.Count,
+                    volumesRank = VP_VolumesRank,
+                    volumesRankUp = VP_VolumesRank_Up,
+                    volumesRankDown = VP_VolumesRank_Down,
+                    deltaRank = VP_DeltaRank,
+                    minMaxDelta = VP_MinMaxDelta,
                     spread = Symbol.Spread
                 };
 
