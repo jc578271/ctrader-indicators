@@ -78,8 +78,9 @@ namespace cAlgo
     [Indicator(IsOverlay = true, TimeZone = TimeZones.UTC, AccessRights = AccessRights.FullAccess)]
     public class FreeVolumeProfileV20 : Indicator
     {
-        private TcpClient _tcpClient;
         private NetworkStream _networkStream;
+        private Button _exportButton;
+        private TcpClient _tcpClient;
 
         [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
         public bool ExportHistory { get; set; }
@@ -670,7 +671,7 @@ namespace cAlgo
 
         private void AddExportButton(Panel panel, Color btnColor)
         {
-            Button button = new()
+            _exportButton = new Button()
             {
                 Text = "Export",
                 Padding = 0,
@@ -679,8 +680,8 @@ namespace cAlgo
                 Margin = 2,
                 BackgroundColor = btnColor
             };
-            button.Click += ExportEvent;
-            panel.AddChild(button);
+            _exportButton.Click += ExportEvent;
+            panel.AddChild(_exportButton);
         }
 
         private void HiddenEvent(ButtonClickEventArgs obj)
@@ -691,10 +692,30 @@ namespace cAlgo
                 ParamBorder.IsVisible = true;
         }
 
+        private void ConnectSocket()
+        {
+            if (_tcpClient != null && _tcpClient.Connected) return;
+
+            try {
+                if (_tcpClient != null) {
+                    try { _networkStream?.Close(); } catch {}
+                    try { _tcpClient.Close(); } catch {}
+                }
+                _tcpClient = new TcpClient("127.0.0.1", 5555);
+                _networkStream = _tcpClient.GetStream();
+                Print("Successfully connected to Python Socket (OrderFlow Exporter)");
+            } catch (Exception ex) {
+                Print("Socket Error: " + ex.Message);
+            }
+        }
+
         private void ExportEvent(ButtonClickEventArgs obj)
         {
+            _exportButton.IsEnabled = false;
             try
             {
+                ConnectSocket();
+
                 bool originalExport = ExportHistory;
                 ExportHistory = true;
 
@@ -708,14 +729,15 @@ namespace cAlgo
             {
                 Print("Export Error: " + ex.Message);
             }
+            finally
+            {
+                _exportButton.IsEnabled = true;
+            }
         }
 
         protected override void Initialize()
         {
-            try {
-                _tcpClient = new TcpClient("127.0.0.1", 5555);
-                _networkStream = _tcpClient.GetStream();
-            } catch { Print("Python Socket Server not running at 127.0.0.1:5555"); }
+            ConnectSocket();
 
             // ========== Predefined Config ==========
             if (RowConfig_Input == RowConfig_Data.ATR && (Chart.TimeFrame >= TimeFrame.Minute && Chart.TimeFrame <= TimeFrame.Day3))

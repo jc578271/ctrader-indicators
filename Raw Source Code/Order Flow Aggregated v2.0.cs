@@ -148,6 +148,7 @@ namespace cAlgo
     {
         private TcpClient _tcpClient;
         private NetworkStream _tcpStream;
+        private Button _exportButton;
 
         [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
         public bool ExportHistory { get; set; }
@@ -1280,13 +1281,7 @@ namespace cAlgo
 
         protected override void Initialize()
         {
-            try {
-                _tcpClient = new TcpClient("127.0.0.1", 5555);
-                _tcpStream = _tcpClient.GetStream();
-                Print("Successfully connected to Python Socket (OrderFlow Exporter)");
-            } catch (Exception ex) {
-                Print("Socket Error: " + ex.Message);
-            }
+            ConnectSocket();
 
             if (RowConfig_Input == RowConfig_Data.Custom)
                 heightPips = CustomHeightInPips;
@@ -1488,7 +1483,7 @@ namespace cAlgo
 
         private void AddExportButton(Panel panel, Color btnColor)
         {
-            Button button = new()
+            _exportButton = new Button()
             {
                 Text = "Export",
                 Padding = 0,
@@ -1497,8 +1492,8 @@ namespace cAlgo
                 Margin = 2,
                 BackgroundColor = btnColor
             };
-            button.Click += ExportEvent;
-            panel.AddChild(button);
+            _exportButton.Click += ExportEvent;
+            panel.AddChild(_exportButton);
         }
 
         private void HiddenEvent(ButtonClickEventArgs obj)
@@ -1509,10 +1504,30 @@ namespace cAlgo
                 ParamBorder.IsVisible = true;
         }
 
+        private void ConnectSocket()
+        {
+            if (_tcpClient != null && _tcpClient.Connected) return;
+
+            try {
+                if (_tcpClient != null) {
+                    try { _tcpStream?.Close(); } catch {}
+                    try { _tcpClient.Close(); } catch {}
+                }
+                _tcpClient = new TcpClient("127.0.0.1", 5555);
+                _tcpStream = _tcpClient.GetStream();
+                Print("Successfully connected to Python Socket (OrderFlow Exporter)");
+            } catch (Exception ex) {
+                Print("Socket Error: " + ex.Message);
+            }
+        }
+
         private void ExportEvent(ButtonClickEventArgs obj)
         {
+            _exportButton.IsEnabled = false;
             try
             {
+                ConnectSocket();
+
                 bool originalExport = ExportHistory;
                 ExportHistory = true;
 
@@ -1525,6 +1540,10 @@ namespace cAlgo
             catch (Exception ex)
             {
                 Print("Export Error: " + ex.Message);
+            }
+            finally
+            {
+                _exportButton.IsEnabled = true;
             }
         }
 
