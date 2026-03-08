@@ -912,11 +912,15 @@ namespace cAlgo
             // === Export Volume Profile data to Python ===
             if (ExportHistory || IsLastBar)
             {
-                SendSocketData(index);
+                if (ProfileParams.EnableMainVP && VP_VolumesRank.Count > 0)
+                    SendSocketData(index, "main", VP_VolumesRank, VP_VolumesRank_Up, VP_VolumesRank_Down, VP_DeltaRank, VP_MinMaxDelta);
+
+                if (ProfileParams.EnableMiniProfiles && MiniRank.Normal.Count > 0)
+                    SendSocketData(index, "mini", MiniRank.Normal, MiniRank.Up, MiniRank.Down, MiniRank.Delta, MiniRank.MinMaxDelta);
             }
         }
 
-        public void SendSocketData(int index)
+        public void SendSocketData(int index, string profileType, Dictionary<double, double> volRank, Dictionary<double, double> volUp, Dictionary<double, double> volDown, Dictionary<double, double> deltaRank, double[] minMaxDelta)
         {
             try
             {
@@ -925,13 +929,13 @@ namespace cAlgo
                 double valPrice = 0;
                 double totalVolume = 0;
 
-                if (VP_VolumesRank.Count > 0)
+                if (volRank.Count > 0)
                 {
-                    totalVolume = VP_VolumesRank.Values.Sum();
-                    double maxVol = VP_VolumesRank.Values.Max();
-                    pocPrice = VP_VolumesRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
+                    totalVolume = volRank.Values.Sum();
+                    double maxVol = volRank.Values.Max();
+                    pocPrice = volRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
 
-                    double[] vaResult = VA_Calculation(VP_VolumesRank);
+                    double[] vaResult = VA_Calculation(volRank);
                     if (vaResult.Length >= 3)
                     {
                         valPrice = vaResult[0];
@@ -943,6 +947,7 @@ namespace cAlgo
                 var exportData = new
                 {
                     type = "volume_profile",
+                    profile_type = profileType,
                     symbol = Symbol.Name,
                     timeframe = Chart.TimeFrame.ShortName,
                     timestamp = Bars.OpenTimes[index].ToString("o"),
@@ -954,11 +959,11 @@ namespace cAlgo
                     vpVAH = vahPrice,
                     vpVAL = valPrice,
                     vpTotalVolume = totalVolume,
-                    volumesRank = VP_VolumesRank,
-                    volumesRankUp = VP_VolumesRank_Up,
-                    volumesRankDown = VP_VolumesRank_Down,
-                    deltaRank = VP_DeltaRank,
-                    minMaxDelta = VP_MinMaxDelta,
+                    volumesRank = volRank,
+                    volumesRankUp = volUp,
+                    volumesRankDown = volDown,
+                    deltaRank = deltaRank,
+                    minMaxDelta = minMaxDelta,
                     spread = Symbol.Spread
                 };
 
@@ -4002,6 +4007,16 @@ namespace cAlgo
                 try { if (ProfileParams.EnableMainVP) VolumeProfile(startIndex, index); } catch { }
                 
                 CreateMiniVPs(index);
+
+                // Export recalculated history
+                if (ExportHistory)
+                {
+                    if (ProfileParams.EnableMainVP && VP_VolumesRank.Count > 0)
+                        SendSocketData(index, "main", VP_VolumesRank, VP_VolumesRank_Up, VP_VolumesRank_Down, VP_DeltaRank, VP_MinMaxDelta);
+
+                    if (ProfileParams.EnableMiniProfiles && MiniRank.Normal.Count > 0)
+                        SendSocketData(index, "mini", MiniRank.Normal, MiniRank.Up, MiniRank.Down, MiniRank.Delta, MiniRank.MinMaxDelta);
+                }
             }
 
             configHasChanged = true;
