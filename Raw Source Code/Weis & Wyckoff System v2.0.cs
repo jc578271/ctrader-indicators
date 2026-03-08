@@ -679,12 +679,47 @@ namespace cAlgo
             button.Click += HiddenEvent;
             panel.AddChild(button);
         }
+
+        private void AddExportButton(Panel panel, Color btnColor)
+        {
+            Button button = new()
+            {
+                Text = "Export",
+                Padding = 0,
+                Height = 22,
+                Width = 50,
+                Margin = 2,
+                BackgroundColor = btnColor
+            };
+            button.Click += ExportEvent;
+            panel.AddChild(button);
+        }
+
         private void HiddenEvent(ButtonClickEventArgs obj)
         {
             if (ParamBorder.IsVisible)
                 ParamBorder.IsVisible = false;
             else
                 ParamBorder.IsVisible = true;
+        }
+
+        private void ExportEvent(ButtonClickEventArgs obj)
+        {
+            try
+            {
+                bool originalExport = ExportHistory;
+                ExportHistory = true;
+
+                Print("Starting Weis Wave & Wyckoff Export...");
+                ClearAndRecalculate();
+                Print("Weis Wave & Wyckoff Export Finished.");
+
+                ExportHistory = originalExport;
+            }
+            catch (Exception ex)
+            {
+                Print("Export Error: " + ex.Message);
+            }
         }
 
         protected override void Initialize()
@@ -819,6 +854,7 @@ namespace cAlgo
                 HorizontalAlignment = hAlign,
             };
             AddHiddenButton(stackPanel, Color.FromHex("#7F808080"));
+            AddExportButton(stackPanel, Color.FromHex("#7F808080"));
             Chart.AddControl(stackPanel);
         }
 
@@ -2907,6 +2943,9 @@ namespace cAlgo
 
                 if (ShowWicks && BooleanUtils.isRenkoChart)
                     RenkoWicks(index);
+
+                if (ExportHistory)
+                    SendSocketData(index);
             }
 
             if (!UseTimeBasedVolume && !BooleanUtils.isPriceBased_Chart || BooleanUtils.isPriceBased_Chart)

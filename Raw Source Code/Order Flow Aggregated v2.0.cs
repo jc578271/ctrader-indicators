@@ -1467,6 +1467,7 @@ namespace cAlgo
                 HorizontalAlignment = hAlign,
             };
             AddHiddenButton(stackPanel, Color.FromHex("#7F808080"));
+            AddExportButton(stackPanel, Color.FromHex("#7F808080"));
             Chart.AddControl(stackPanel);
         }
 
@@ -1484,12 +1485,47 @@ namespace cAlgo
             button.Click += HiddenEvent;
             panel.AddChild(button);
         }
+
+        private void AddExportButton(Panel panel, Color btnColor)
+        {
+            Button button = new()
+            {
+                Text = "Export",
+                Padding = 0,
+                Height = 22,
+                Width = 50,
+                Margin = 2,
+                BackgroundColor = btnColor
+            };
+            button.Click += ExportEvent;
+            panel.AddChild(button);
+        }
+
         private void HiddenEvent(ButtonClickEventArgs obj)
         {
             if (ParamBorder.IsVisible)
                 ParamBorder.IsVisible = false;
             else
                 ParamBorder.IsVisible = true;
+        }
+
+        private void ExportEvent(ButtonClickEventArgs obj)
+        {
+            try
+            {
+                bool originalExport = ExportHistory;
+                ExportHistory = true;
+
+                Print("Starting Order Flow Export...");
+                ClearAndRecalculate();
+                Print("Order Flow Export Finished.");
+
+                ExportHistory = originalExport;
+            }
+            catch (Exception ex)
+            {
+                Print("Export Error: " + ex.Message);
+            }
         }
 
         public override void Calculate(int index)
