@@ -136,6 +136,7 @@ using System.Threading;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.IO;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Text;
@@ -149,9 +150,35 @@ namespace cAlgo
         private TcpClient _tcpClient;
         private NetworkStream _tcpStream;
         private Button _exportButton;
+        private bool _isManualCsvExportInProgress;
+        private const string DefaultCsvOutputFolder = @"D:\projects\quant-trading";
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+        private static readonly string[] ExportCsvHeaders =
+        {
+            "type",
+            "symbol",
+            "timeframe",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volumesRank",
+            "volumesRankUp",
+            "volumesRankDown",
+            "deltaRank",
+            "minMaxDelta",
+            "spread"
+        };
 
         [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
         public bool ExportHistory { get; set; }
+
+        [Parameter("Direct CSV Export", DefaultValue = true, Group = "==== Python AI Export ====")]
+        public bool DirectCsvExport { get; set; }
+
+        [Parameter("CSV Output Folder", DefaultValue = DefaultCsvOutputFolder, Group = "==== Python AI Export ====")]
+        public string CsvOutputFolder { get; set; }
 
         public enum LoadTickFrom_Data
         {
@@ -1530,6 +1557,7 @@ namespace cAlgo
 
                 bool originalExport = ExportHistory;
                 ExportHistory = true;
+                _isManualCsvExportInProgress = true;
 
                 Print("Starting Order Flow Export...");
                 ClearAndRecalculate();
@@ -1543,6 +1571,7 @@ namespace cAlgo
             }
             finally
             {
+                _isManualCsvExportInProgress = false;
                 _exportButton.IsEnabled = true;
             }
         }
@@ -1673,6 +1702,85 @@ namespace cAlgo
             BooleanLocks.spikeNotify = value;
             BooleanLocks.ultraNotify = !value;
         }
+
+        private Dictionary<string, object> BuildExportPayload(int iStart)
+        {
+            return new Dictionary<string, object>
+            {
+                ["type"] = "order_flow_aggregated",
+                ["symbol"] = Symbol.Name,
+                ["timeframe"] = Chart.TimeFrame.ShortName,
+                ["timestamp"] = Bars.OpenTimes[iStart].ToString("o"),
+                ["open"] = Bars.OpenPrices[iStart],
+                ["high"] = Bars.HighPrices[iStart],
+                ["low"] = Bars.LowPrices[iStart],
+                ["close"] = Bars.ClosePrices[iStart],
+                ["volumesRank"] = VolumesRank,
+                ["volumesRankUp"] = VolumesRank_Up,
+                ["volumesRankDown"] = VolumesRank_Down,
+                ["deltaRank"] = DeltaRank,
+                ["minMaxDelta"] = MinMaxDelta,
+                ["spread"] = Symbol.Spread
+            };
+        }
+
+        private void AppendDirectCsv(Dictionary<string, object> exportData)
+        {
+            if (!DirectCsvExport || !_isManualCsvExportInProgress)
+                return;
+
+            string outputFolder = string.IsNullOrWhiteSpace(CsvOutputFolder) ? DefaultCsvOutputFolder : CsvOutputFolder.Trim();
+            Directory.CreateDirectory(outputFolder);
+
+            string filePath = Path.Combine(outputFolder, "history_orderflowaggregated.csv");
+            bool writeHeader = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
+
+            using (StreamWriter writer = new StreamWriter(filePath, true, Utf8NoBom))
+            {
+                if (writeHeader)
+                    writer.WriteLine(string.Join(",", ExportCsvHeaders));
+
+                string[] rowValues = new string[ExportCsvHeaders.Length];
+
+                for (int i = 0; i < ExportCsvHeaders.Length; i++)
+                {
+                    string key = ExportCsvHeaders[i];
+                    object value;
+                    exportData.TryGetValue(key, out value);
+                    rowValues[i] = EscapeCsvValue(ConvertExportValue(value));
+                }
+
+                writer.WriteLine(string.Join(",", rowValues));
+            }
+        }
+
+        private string ConvertExportValue(object value)
+        {
+            if (value == null)
+                return string.Empty;
+
+            if (value is string stringValue)
+                return stringValue;
+
+            Type valueType = value.GetType();
+            if (valueType.IsArray || (value is System.Collections.IEnumerable && !(value is string)))
+                return JsonSerializer.Serialize(value);
+
+            return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        private string EscapeCsvValue(string value)
+        {
+            if (value == null)
+                return string.Empty;
+
+            bool mustQuote = value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r');
+            if (!mustQuote)
+                return value;
+
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
+
         public void SendSocketData(int iStart)
         {
             // Filter out empty bars: only send if volume profile data exists
@@ -1680,26 +1788,24 @@ namespace cAlgo
 
             try
             {
-                var exportData = new
+                Dictionary<string, object> exportData = BuildExportPayload(iStart);
+
+                try
                 {
-                    type = "order_flow_aggregated",
-                    symbol = Symbol.Name,
-                    timeframe = Chart.TimeFrame.ShortName,
-                    timestamp = Bars.OpenTimes[iStart].ToString("o"),
-                    open = Bars.OpenPrices[iStart],
-                    high = Bars.HighPrices[iStart],
-                    low = Bars.LowPrices[iStart],
-                    close = Bars.ClosePrices[iStart],
-                    volumesRank = VolumesRank,
-                    volumesRankUp = VolumesRank_Up,
-                    volumesRankDown = VolumesRank_Down,
-                    deltaRank = DeltaRank,
-                    minMaxDelta = MinMaxDelta,
-                    spread = Symbol.Spread
-                };
+                    AppendDirectCsv(exportData);
+                }
+                catch (Exception ex)
+                {
+                    Print("CSV Export Error: " + ex.Message);
+                }
+
                 string jsonString = JsonSerializer.Serialize(exportData) + "\n";
                 byte[] dataBytes = Encoding.UTF8.GetBytes(jsonString);
-                _tcpStream.Write(dataBytes, 0, dataBytes.Length);
+                try
+                {
+                    _tcpStream.Write(dataBytes, 0, dataBytes.Length);
+                }
+                catch (Exception) { }
             }
             catch (Exception) { }
         }
