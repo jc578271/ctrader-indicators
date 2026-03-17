@@ -69,6 +69,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
+using System.IO;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Text;
@@ -81,9 +82,40 @@ namespace cAlgo
         private NetworkStream _networkStream;
         private Button _exportButton;
         private TcpClient _tcpClient;
+        private bool _isManualCsvExportInProgress;
+        private const string DefaultCsvOutputFolder = @"D:\projects\quant-trading";
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+        private static readonly string[] ExportCsvHeaders =
+        {
+            "type",
+            "profile_type",
+            "symbol",
+            "timeframe",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vpPOC",
+            "vpVAH",
+            "vpVAL",
+            "vpTotalVolume",
+            "volumesRank",
+            "volumesRankUp",
+            "volumesRankDown",
+            "deltaRank",
+            "minMaxDelta",
+            "spread"
+        };
 
         [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
         public bool ExportHistory { get; set; }
+
+        [Parameter("Direct CSV Export", DefaultValue = true, Group = "==== Python AI Export ====")]
+        public bool DirectCsvExport { get; set; }
+
+        [Parameter("CSV Output Folder", DefaultValue = DefaultCsvOutputFolder, Group = "==== Python AI Export ====")]
+        public string CsvOutputFolder { get; set; }
 
         public enum PanelAlign_Data
         {
@@ -718,6 +750,7 @@ namespace cAlgo
 
                 bool originalExport = ExportHistory;
                 ExportHistory = true;
+                _isManualCsvExportInProgress = true;
 
                 Print("Starting Volume Profile Export...");
                 ClearAndRecalculate();
@@ -731,6 +764,7 @@ namespace cAlgo
             }
             finally
             {
+                _isManualCsvExportInProgress = false;
                 _exportButton.IsEnabled = true;
             }
         }
@@ -968,7 +1002,15 @@ namespace cAlgo
             }
 
             // === Export Volume Profile data to Python ===
-            if (ExportHistory || IsLastBar)
+            if (ExportHistory)
+            {
+                if (ProfileParams.EnableMainVP && VP_VolumesRank.Count > 0)
+                    ExportCsvData(index, "main", VP_VolumesRank, VP_VolumesRank_Up, VP_VolumesRank_Down, VP_DeltaRank, VP_MinMaxDelta);
+
+                if (ProfileParams.EnableMiniProfiles && MiniRank.Normal.Count > 0)
+                    ExportCsvData(index, "mini", MiniRank.Normal, MiniRank.Up, MiniRank.Down, MiniRank.Delta, MiniRank.MinMaxDelta);
+            }
+            else if (IsLastBar)
             {
                 if (ProfileParams.EnableMainVP && VP_VolumesRank.Count > 0)
                     SendSocketData(index, "main", VP_VolumesRank, VP_VolumesRank_Up, VP_VolumesRank_Down, VP_DeltaRank, VP_MinMaxDelta);
@@ -982,54 +1024,129 @@ namespace cAlgo
         {
             try
             {
-                double pocPrice = 0;
-                double vahPrice = 0;
-                double valPrice = 0;
-                double totalVolume = 0;
-
-                if (volRank.Count > 0)
-                {
-                    totalVolume = volRank.Values.Sum();
-                    double maxVol = volRank.Values.Max();
-                    pocPrice = volRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
-
-                    double[] vaResult = VA_Calculation(volRank);
-                    if (vaResult.Length >= 3)
-                    {
-                        valPrice = vaResult[0];
-                        vahPrice = vaResult[1];
-                        pocPrice = vaResult[2];
-                    }
-                }
-
-                var exportData = new
-                {
-                    type = "volume_profile",
-                    profile_type = profileType,
-                    symbol = Symbol.Name,
-                    timeframe = Chart.TimeFrame.ShortName,
-                    timestamp = Bars.OpenTimes[index].ToString("o"),
-                    open = Bars.OpenPrices[index],
-                    high = Bars.HighPrices[index],
-                    low = Bars.LowPrices[index],
-                    close = Bars.ClosePrices[index],
-                    vpPOC = pocPrice,
-                    vpVAH = vahPrice,
-                    vpVAL = valPrice,
-                    vpTotalVolume = totalVolume,
-                    volumesRank = volRank,
-                    volumesRankUp = volUp,
-                    volumesRankDown = volDown,
-                    deltaRank = deltaRank,
-                    minMaxDelta = minMaxDelta,
-                    spread = Symbol.Spread
-                };
+                Dictionary<string, object> exportData = BuildExportPayload(index, profileType, volRank, volUp, volDown, deltaRank, minMaxDelta);
 
                 string jsonString = JsonSerializer.Serialize(exportData);
                 byte[] data = Encoding.UTF8.GetBytes(jsonString + "\n");
                 _networkStream?.Write(data, 0, data.Length);
             }
             catch { }
+        }
+
+        private Dictionary<string, object> BuildExportPayload(int index, string profileType, Dictionary<double, double> volRank, Dictionary<double, double> volUp, Dictionary<double, double> volDown, Dictionary<double, double> deltaRank, double[] minMaxDelta)
+        {
+            double pocPrice = 0;
+            double vahPrice = 0;
+            double valPrice = 0;
+            double totalVolume = 0;
+
+            if (volRank.Count > 0)
+            {
+                totalVolume = volRank.Values.Sum();
+                double maxVol = volRank.Values.Max();
+                pocPrice = volRank.FirstOrDefault(kv => kv.Value == maxVol).Key;
+
+                double[] vaResult = VA_Calculation(volRank);
+                if (vaResult.Length >= 3)
+                {
+                    valPrice = vaResult[0];
+                    vahPrice = vaResult[1];
+                    pocPrice = vaResult[2];
+                }
+            }
+
+            return new Dictionary<string, object>
+            {
+                ["type"] = "volume_profile",
+                ["profile_type"] = profileType,
+                ["symbol"] = Symbol.Name,
+                ["timeframe"] = Chart.TimeFrame.ShortName,
+                ["timestamp"] = Bars.OpenTimes[index].ToString("o"),
+                ["open"] = Bars.OpenPrices[index],
+                ["high"] = Bars.HighPrices[index],
+                ["low"] = Bars.LowPrices[index],
+                ["close"] = Bars.ClosePrices[index],
+                ["vpPOC"] = pocPrice,
+                ["vpVAH"] = vahPrice,
+                ["vpVAL"] = valPrice,
+                ["vpTotalVolume"] = totalVolume,
+                ["volumesRank"] = volRank,
+                ["volumesRankUp"] = volUp,
+                ["volumesRankDown"] = volDown,
+                ["deltaRank"] = deltaRank,
+                ["minMaxDelta"] = minMaxDelta,
+                ["spread"] = Symbol.Spread
+            };
+        }
+
+        private void AppendDirectCsv(Dictionary<string, object> exportData)
+        {
+            if (!DirectCsvExport || !_isManualCsvExportInProgress)
+                return;
+
+            string outputFolder = string.IsNullOrWhiteSpace(CsvOutputFolder) ? DefaultCsvOutputFolder : CsvOutputFolder.Trim();
+            Directory.CreateDirectory(outputFolder);
+
+            string filePath = Path.Combine(outputFolder, "history_volumeprofile.csv");
+            bool writeHeader = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
+
+            using (StreamWriter writer = new StreamWriter(filePath, true, Utf8NoBom))
+            {
+                if (writeHeader)
+                    writer.WriteLine(string.Join(",", ExportCsvHeaders));
+
+                string[] rowValues = new string[ExportCsvHeaders.Length];
+
+                for (int i = 0; i < ExportCsvHeaders.Length; i++)
+                {
+                    string key = ExportCsvHeaders[i];
+                    object value;
+                    exportData.TryGetValue(key, out value);
+                    rowValues[i] = EscapeCsvValue(ConvertExportValue(value));
+                }
+
+                writer.WriteLine(string.Join(",", rowValues));
+            }
+        }
+
+        private string ConvertExportValue(object value)
+        {
+            if (value == null)
+                return string.Empty;
+
+            if (value is string stringValue)
+                return stringValue;
+
+            Type valueType = value.GetType();
+            if (valueType.IsArray || (value is System.Collections.IEnumerable && !(value is string)))
+                return JsonSerializer.Serialize(value);
+
+            return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        private string EscapeCsvValue(string value)
+        {
+            if (value == null)
+                return string.Empty;
+
+            bool mustQuote = value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r');
+            if (!mustQuote)
+                return value;
+
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
+
+        private void ExportCsvData(int index, string profileType, Dictionary<double, double> volRank, Dictionary<double, double> volUp, Dictionary<double, double> volDown, Dictionary<double, double> deltaRank, double[] minMaxDelta)
+        {
+            try
+            {
+                Dictionary<string, object> exportData = BuildExportPayload(index, profileType, volRank, volUp, volDown, deltaRank, minMaxDelta);
+                AppendDirectCsv(exportData);
+            }
+            catch (Exception ex)
+            {
+                Print("CSV Export Error: " + ex.Message);
+            }
         }
 
 
@@ -4070,10 +4187,10 @@ namespace cAlgo
                 if (ExportHistory)
                 {
                     if (ProfileParams.EnableMainVP && VP_VolumesRank.Count > 0)
-                        SendSocketData(index, "main", VP_VolumesRank, VP_VolumesRank_Up, VP_VolumesRank_Down, VP_DeltaRank, VP_MinMaxDelta);
+                        ExportCsvData(index, "main", VP_VolumesRank, VP_VolumesRank_Up, VP_VolumesRank_Down, VP_DeltaRank, VP_MinMaxDelta);
 
                     if (ProfileParams.EnableMiniProfiles && MiniRank.Normal.Count > 0)
-                        SendSocketData(index, "mini", MiniRank.Normal, MiniRank.Up, MiniRank.Down, MiniRank.Delta, MiniRank.MinMaxDelta);
+                        ExportCsvData(index, "mini", MiniRank.Normal, MiniRank.Up, MiniRank.Down, MiniRank.Delta, MiniRank.MinMaxDelta);
                 }
             }
 
