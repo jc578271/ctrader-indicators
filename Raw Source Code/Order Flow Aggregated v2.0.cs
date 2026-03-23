@@ -151,11 +151,10 @@ namespace cAlgo
         private NetworkStream _tcpStream;
         private Button _exportButton;
         private bool _isManualCsvExportInProgress;
-        private const string DefaultCsvOutputFolder = @"D:\projects\quant-trading";
+        private const string DefaultCsvOutputFolder = @"D:\projects\quant-trading\logs";
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
         private static readonly string[] ExportCsvHeaders =
         {
-            "type",
             "symbol",
             "timeframe",
             "timestamp",
@@ -163,19 +162,40 @@ namespace cAlgo
             "high",
             "low",
             "close",
-            "volumesRank",
-            "volumesRankUp",
-            "volumesRankDown",
-            "deltaRank",
-            "minMaxDelta",
-            "spread"
+            "spread",
+            "price_level",
+            "volume_total",
+            "volume_buy",
+            "volume_sell",
+            "delta",
+            "min_delta",
+            "max_delta"
         };
+        private const string EventContractSchema = "event-contract/v1";
+        private const string EventSource = "ctrader";
+        private const string SourceInstanceName = "OrderFlowAggregatedV20";
+        private const string ExportEventName = "order_flow_aggregated";
 
-        [Parameter("Export History Data", DefaultValue = true, Group = "==== Python AI Export ====")]
-        public bool ExportHistory { get; set; }
+        private string BuildExportEventId(int index)
+        {
+            return $"ctrader-{ExportEventName}-{Symbol.Name}-{Bars.OpenTimes[index]:o}";
+        }
 
-        [Parameter("Direct CSV Export", DefaultValue = true, Group = "==== Python AI Export ====")]
-        public bool DirectCsvExport { get; set; }
+        private Dictionary<string, object> BuildContractEnvelope(int index, Dictionary<string, object> payload, Dictionary<string, object> sourceMeta)
+        {
+            return new Dictionary<string, object>
+            {
+                ["schema"] = EventContractSchema,
+                ["source"] = EventSource,
+                ["source_instance"] = SourceInstanceName,
+                ["event"] = ExportEventName,
+                ["event_id"] = BuildExportEventId(index),
+                ["instrument"] = Symbol.Name,
+                ["timestamp"] = Bars.OpenTimes[index].ToString("o"),
+                ["payload"] = payload,
+                ["source_meta"] = sourceMeta
+            };
+        }
 
         [Parameter("CSV Output Folder", DefaultValue = DefaultCsvOutputFolder, Group = "==== Python AI Export ====")]
         public string CsvOutputFolder { get; set; }
@@ -1306,9 +1326,20 @@ namespace cAlgo
             public MiscParams_Info MiscParams { get; set; }
         }
 
+        private static readonly TimeSpan SocketReconnectDelay = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan SocketHeartbeatInterval = TimeSpan.FromSeconds(5);
+        private DateTime _nextReconnectAtUtc = DateTime.MinValue;
+        private DateTime _nextHeartbeatAtUtc = DateTime.MinValue;
+        private int _reconnectCount;
+        private long _droppedEventsTotal;
+        private string _connectionState = "socket disconnected";
+        private bool _hasConnectedOnce;
+        private Button _connectionStatusButton;
+
         protected override void Initialize()
         {
             ConnectSocket();
+            Timer.Start(TimeSpan.FromSeconds(1));
 
             if (RowConfig_Input == RowConfig_Data.Custom)
                 heightPips = CustomHeightInPips;
@@ -1487,6 +1518,7 @@ namespace cAlgo
             {
                 VerticalAlignment = vAlign,
                 HorizontalAlignment = hAlign,
+                Orientation = Orientation.Horizontal,
             };
             AddHiddenButton(stackPanel, Color.FromHex("#7F808080"));
             AddExportButton(stackPanel, Color.FromHex("#7F808080"));
@@ -1521,6 +1553,47 @@ namespace cAlgo
             };
             _exportButton.Click += ExportEvent;
             panel.AddChild(_exportButton);
+
+            _connectionStatusButton = new Button()
+            {
+                Text = "",
+                Padding = 0,
+                Height = 12,
+                Width = 12,
+                Margin = 2,
+                BackgroundColor = btnColor,
+                Style = Styles.CreateButtonStyle()
+            };
+            panel.AddChild(_connectionStatusButton);
+            UpdateConnectionStatusIndicator();
+
+            Button reconnectButton = new()
+            {
+                Text = "Reconnect",
+                Padding = 0,
+                Height = 22,
+                Width = 75,
+                Margin = 2,
+                BackgroundColor = btnColor
+            };
+            reconnectButton.Click += ReconnectEvent;
+            panel.AddChild(reconnectButton);
+        }
+
+        private Color GetConnectionStatusColor()
+        {
+            return _connectionState == "socket connected"
+                ? Color.FromHex("#2ECC71")
+                : Color.FromHex("#E74C3C");
+        }
+
+        private void UpdateConnectionStatusIndicator()
+        {
+            if (_connectionStatusButton == null)
+                return;
+
+            _connectionStatusButton.Text = "";
+            _connectionStatusButton.BackgroundColor = GetConnectionStatusColor();
         }
 
         private void HiddenEvent(ButtonClickEventArgs obj)
@@ -1531,20 +1604,164 @@ namespace cAlgo
                 ParamBorder.IsVisible = true;
         }
 
-        private void ConnectSocket()
+        private void CloseSocketConnection()
         {
-            if (_tcpClient != null && _tcpClient.Connected) return;
+            try { _tcpStream?.Close(); } catch {}
+            try { _tcpClient?.Close(); } catch {}
 
-            try {
-                if (_tcpClient != null) {
-                    try { _tcpStream?.Close(); } catch {}
-                    try { _tcpClient.Close(); } catch {}
-                }
+            _tcpStream = null;
+            _tcpClient = null;
+        }
+
+        private void SetConnectionState(string nextState)
+        {
+            if (_connectionState == nextState)
+                return;
+
+            _connectionState = nextState;
+            Print(nextState);
+            UpdateConnectionStatusIndicator();
+        }
+
+        private void ResetHeartbeatDeadline()
+        {
+            _nextHeartbeatAtUtc = DateTime.UtcNow.Add(SocketHeartbeatInterval);
+        }
+
+        private void HandleSocketDisconnect()
+        {
+            CloseSocketConnection();
+            SetConnectionState("socket disconnected");
+        }
+
+        private bool SendConnectionHello(int reconnectCount)
+        {
+            if (_tcpStream == null)
+                return false;
+
+            try
+            {
+                var hello = new Dictionary<string, object>
+                {
+                    ["kind"] = "connection_hello",
+                    ["source"] = EventSource,
+                    ["source_instance"] = SourceInstanceName,
+                    ["instrument"] = Symbol.Name,
+                    ["timestamp"] = DateTime.UtcNow.ToString("o"),
+                    ["reconnect_count"] = reconnectCount,
+                    ["dropped_events_total"] = _droppedEventsTotal
+                };
+
+                string jsonString = JsonSerializer.Serialize(hello) + "\n";
+                byte[] dataBytes = Encoding.UTF8.GetBytes(jsonString);
+                _tcpStream.Write(dataBytes, 0, dataBytes.Length);
+                return true;
+            }
+            catch (Exception)
+            {
+                HandleSocketDisconnect();
+                return false;
+            }
+        }
+
+        private bool SendConnectionHeartbeat()
+        {
+            if (_tcpStream == null)
+                return false;
+
+            try
+            {
+                var heartbeat = new Dictionary<string, object>
+                {
+                    ["kind"] = "connection_heartbeat",
+                    ["source"] = EventSource,
+                    ["source_instance"] = SourceInstanceName,
+                    ["instrument"] = Symbol.Name,
+                    ["timestamp"] = DateTime.UtcNow.ToString("o"),
+                    ["reconnect_count"] = _reconnectCount,
+                    ["dropped_events_total"] = _droppedEventsTotal
+                };
+
+                string jsonString = JsonSerializer.Serialize(heartbeat) + "\n";
+                byte[] dataBytes = Encoding.UTF8.GetBytes(jsonString);
+                _tcpStream.Write(dataBytes, 0, dataBytes.Length);
+                ResetHeartbeatDeadline();
+                return true;
+            }
+            catch (Exception)
+            {
+                HandleSocketDisconnect();
+                return false;
+            }
+        }
+
+        private bool EnsureSocketConnected(bool force = false)
+        {
+            if (_tcpClient != null && _tcpClient.Connected && _tcpStream != null)
+                return true;
+
+            DateTime now = DateTime.UtcNow;
+            if (!force && now < _nextReconnectAtUtc)
+                return false;
+
+            _nextReconnectAtUtc = now.Add(SocketReconnectDelay);
+            SetConnectionState("socket reconnecting");
+
+            try
+            {
+                CloseSocketConnection();
                 _tcpClient = new TcpClient("127.0.0.1", 5555);
                 _tcpStream = _tcpClient.GetStream();
-                Print("Successfully connected to Python Socket (OrderFlow Exporter)");
-            } catch (Exception ex) {
-                Print("Socket Error: " + ex.Message);
+                int helloReconnectCount = _hasConnectedOnce ? _reconnectCount + 1 : _reconnectCount;
+                if (!SendConnectionHello(helloReconnectCount))
+                    return false;
+
+                _reconnectCount = helloReconnectCount;
+                _hasConnectedOnce = true;
+                ResetHeartbeatDeadline();
+                SetConnectionState("socket connected");
+                return true;
+            }
+            catch (Exception)
+            {
+                HandleSocketDisconnect();
+                return false;
+            }
+        }
+
+        private void HandleSocketWriteFailure()
+        {
+            _droppedEventsTotal++;
+            HandleSocketDisconnect();
+        }
+
+        private void RunSocketHeartbeat()
+        {
+            if (!EnsureSocketConnected())
+                return;
+
+            if (DateTime.UtcNow < _nextHeartbeatAtUtc)
+                return;
+
+            SendConnectionHeartbeat();
+        }
+
+        private void ConnectSocket()
+        {
+            EnsureSocketConnected(force: true);
+        }
+
+        private void ReconnectEvent(ButtonClickEventArgs obj)
+        {
+            try
+            {
+                CloseSocketConnection();
+                _nextReconnectAtUtc = DateTime.MinValue;
+                EnsureSocketConnected(force: true);
+            }
+            catch (Exception ex)
+            {
+                Print("Reconnect Error: " + ex.Message);
             }
         }
 
@@ -1554,16 +1771,11 @@ namespace cAlgo
             try
             {
                 ConnectSocket();
-
-                bool originalExport = ExportHistory;
-                ExportHistory = true;
                 _isManualCsvExportInProgress = true;
 
                 Print("Starting Order Flow Export...");
                 ClearAndRecalculate();
                 Print("Order Flow Export Finished.");
-
-                ExportHistory = originalExport;
             }
             catch (Exception ex)
             {
@@ -1705,12 +1917,8 @@ namespace cAlgo
 
         private Dictionary<string, object> BuildExportPayload(int iStart)
         {
-            return new Dictionary<string, object>
+            Dictionary<string, object> payload = new Dictionary<string, object>
             {
-                ["type"] = "order_flow_aggregated",
-                ["symbol"] = Symbol.Name,
-                ["timeframe"] = Chart.TimeFrame.ShortName,
-                ["timestamp"] = Bars.OpenTimes[iStart].ToString("o"),
                 ["open"] = Bars.OpenPrices[iStart],
                 ["high"] = Bars.HighPrices[iStart],
                 ["low"] = Bars.LowPrices[iStart],
@@ -1722,17 +1930,27 @@ namespace cAlgo
                 ["minMaxDelta"] = MinMaxDelta,
                 ["spread"] = Symbol.Spread
             };
+
+            Dictionary<string, object> sourceMeta = new Dictionary<string, object>
+            {
+                ["symbol"] = Symbol.Name,
+                ["timeframe"] = Chart.TimeFrame.ShortName,
+                ["legacy_type"] = ExportEventName
+            };
+
+            return BuildContractEnvelope(iStart, payload, sourceMeta);
         }
 
         private void AppendDirectCsv(Dictionary<string, object> exportData)
         {
-            if (!DirectCsvExport || !_isManualCsvExportInProgress)
+            if (!_isManualCsvExportInProgress)
                 return;
 
             string outputFolder = string.IsNullOrWhiteSpace(CsvOutputFolder) ? DefaultCsvOutputFolder : CsvOutputFolder.Trim();
             Directory.CreateDirectory(outputFolder);
 
-            string filePath = Path.Combine(outputFolder, "history_orderflowaggregated.csv");
+            string symbol = ResolveExportSymbol(exportData, sourceMeta: null);
+            string filePath = Path.Combine(outputFolder, $"history_orderflowaggregated_{symbol}.csv");
             bool writeHeader = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
 
             using (StreamWriter writer = new StreamWriter(filePath, true, Utf8NoBom))
@@ -1740,17 +1958,48 @@ namespace cAlgo
                 if (writeHeader)
                     writer.WriteLine(string.Join(",", ExportCsvHeaders));
 
-                string[] rowValues = new string[ExportCsvHeaders.Length];
+                var payload = exportData["payload"] as Dictionary<string, object>;
+                var sourceMeta = exportData["source_meta"] as Dictionary<string, object>;
+                if (payload == null || sourceMeta == null)
+                    return;
 
-                for (int i = 0; i < ExportCsvHeaders.Length; i++)
+                Dictionary<double, double> volumesRank = GetDoubleDictionary(payload, "volumesRank");
+                Dictionary<double, double> volumesRankUp = GetDoubleDictionary(payload, "volumesRankUp");
+                Dictionary<double, double> volumesRankDown = GetDoubleDictionary(payload, "volumesRankDown");
+                Dictionary<double, double> deltaRank = GetDoubleDictionary(payload, "deltaRank");
+                double[] minMaxDelta = GetMinMaxDelta(payload);
+
+                double[] orderedPriceLevels = volumesRank.Keys
+                    .Concat(volumesRankUp.Keys)
+                    .Concat(volumesRankDown.Keys)
+                    .Concat(deltaRank.Keys)
+                    .Distinct()
+                    .OrderBy(price => price)
+                    .ToArray();
+
+                foreach (double priceLevel in orderedPriceLevels)
                 {
-                    string key = ExportCsvHeaders[i];
-                    object value;
-                    exportData.TryGetValue(key, out value);
-                    rowValues[i] = EscapeCsvValue(ConvertExportValue(value));
-                }
+                    string[] rowValues = new string[ExportCsvHeaders.Length];
 
-                writer.WriteLine(string.Join(",", rowValues));
+                    for (int i = 0; i < ExportCsvHeaders.Length; i++)
+                    {
+                        string key = ExportCsvHeaders[i];
+                        object value = ResolveFlattenedExportValue(
+                            exportData,
+                            sourceMeta,
+                            payload,
+                            key,
+                            priceLevel,
+                            volumesRank,
+                            volumesRankUp,
+                            volumesRankDown,
+                            deltaRank,
+                            minMaxDelta);
+                        rowValues[i] = EscapeCsvValue(ConvertExportValue(value));
+                    }
+
+                    writer.WriteLine(string.Join(",", rowValues));
+                }
             }
         }
 
@@ -1767,6 +2016,144 @@ namespace cAlgo
                 return JsonSerializer.Serialize(value);
 
             return Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        private object ResolveExportValue(Dictionary<string, object> exportData, string key)
+        {
+            object value;
+            if (exportData.TryGetValue(key, out value))
+                return value;
+
+            if (key == "type" && exportData.TryGetValue("event", out value))
+                return value;
+
+            if (key == "symbol" || key == "timeframe")
+            {
+                if (exportData.TryGetValue("source_meta", out object sourceMetaObj) &&
+                    sourceMetaObj is Dictionary<string, object> sourceMeta &&
+                    sourceMeta.TryGetValue(key, out value))
+                {
+                    return value;
+                }
+
+                if (key == "symbol" && exportData.TryGetValue("instrument", out value))
+                    return value;
+            }
+
+            if (exportData.TryGetValue("payload", out object payloadObj) &&
+                payloadObj is Dictionary<string, object> payload &&
+                payload.TryGetValue(key, out value))
+            {
+                return value;
+            }
+
+            return null;
+        }
+
+        private Dictionary<double, double> GetDoubleDictionary(Dictionary<string, object> payload, string key)
+        {
+            if (!payload.TryGetValue(key, out object value) || value == null)
+                return new Dictionary<double, double>();
+
+            if (value is Dictionary<double, double> doubleDictionary)
+                return new Dictionary<double, double>(doubleDictionary);
+
+            if (value is Dictionary<double, int> intDictionary)
+                return intDictionary.ToDictionary(entry => entry.Key, entry => (double)entry.Value);
+
+            return new Dictionary<double, double>();
+        }
+
+        private double[] GetMinMaxDelta(Dictionary<string, object> payload)
+        {
+            if (payload.TryGetValue("minMaxDelta", out object value))
+            {
+                if (value is int[] intArray)
+                    return intArray.Select(number => (double)number).ToArray();
+
+                if (value is double[] doubleArray)
+                    return doubleArray;
+            }
+
+            return new double[] { 0, 0 };
+        }
+
+        private object ResolveFlattenedExportValue(
+            Dictionary<string, object> exportData,
+            Dictionary<string, object> sourceMeta,
+            Dictionary<string, object> payload,
+            string key,
+            double priceLevel,
+            Dictionary<double, double> volumesRank,
+            Dictionary<double, double> volumesRankUp,
+            Dictionary<double, double> volumesRankDown,
+            Dictionary<double, double> deltaRank,
+            double[] minMaxDelta)
+        {
+            switch (key)
+            {
+                case "symbol":
+                    return ResolveSourceMetaValue(exportData, sourceMeta, "symbol");
+                case "timeframe":
+                    return ResolveSourceMetaValue(exportData, sourceMeta, "timeframe");
+                case "price_level":
+                    return priceLevel;
+                case "volume_total":
+                    return volumesRank.TryGetValue(priceLevel, out double totalVolume) ? totalVolume : 0;
+                case "volume_buy":
+                    return volumesRankUp.TryGetValue(priceLevel, out double buyVolume) ? buyVolume : 0;
+                case "volume_sell":
+                    return volumesRankDown.TryGetValue(priceLevel, out double sellVolume) ? sellVolume : 0;
+                case "delta":
+                    return deltaRank.TryGetValue(priceLevel, out double delta) ? delta : 0;
+                case "min_delta":
+                    return minMaxDelta.Length > 0 ? minMaxDelta[0] : 0;
+                case "max_delta":
+                    return minMaxDelta.Length > 1 ? minMaxDelta[1] : 0;
+                default:
+                    return payload.TryGetValue(key, out object value) ? value : ResolveExportValue(exportData, key);
+            }
+        }
+
+        private object ResolveSourceMetaValue(
+            Dictionary<string, object> exportData,
+            Dictionary<string, object> sourceMeta,
+            string key)
+        {
+            if (sourceMeta.TryGetValue(key, out object value))
+                return value;
+
+            if (key == "symbol" && exportData.TryGetValue("instrument", out value))
+                return value;
+
+            return null;
+        }
+
+        private string ResolveExportSymbol(
+            Dictionary<string, object> exportData,
+            Dictionary<string, object> sourceMeta)
+        {
+            object symbolValue = sourceMeta != null
+                ? ResolveSourceMetaValue(exportData, sourceMeta, "symbol")
+                : ResolveExportValue(exportData, "symbol");
+            string rawSymbol = Convert.ToString(symbolValue, CultureInfo.InvariantCulture) ?? Symbol.Name;
+            return SanitizeFileToken(rawSymbol);
+        }
+
+        private string SanitizeFileToken(string rawValue)
+        {
+            if (string.IsNullOrWhiteSpace(rawValue))
+                return "unknown";
+
+            StringBuilder builder = new StringBuilder(rawValue.Length);
+            foreach (char character in rawValue)
+            {
+                builder.Append(char.IsLetterOrDigit(character) || character == '.' || character == '-'
+                    ? character
+                    : '_');
+            }
+
+            return builder.ToString();
         }
 
         private string EscapeCsvValue(string value)
@@ -1798,6 +2185,11 @@ namespace cAlgo
         {
             // Filter out empty bars: only send if volume profile data exists
             if (VolumesRank == null || VolumesRank.Count == 0) return;
+            if (!EnsureSocketConnected())
+            {
+                _droppedEventsTotal++;
+                return;
+            }
 
             try
             {
@@ -1809,7 +2201,10 @@ namespace cAlgo
                 {
                     _tcpStream.Write(dataBytes, 0, dataBytes.Length);
                 }
-                catch (Exception) { }
+                catch (Exception)
+                {
+                    HandleSocketWriteFailure();
+                }
             }
             catch (Exception) { }
         }
@@ -3622,11 +4017,12 @@ namespace cAlgo
             }
 
             // TCP SOCKET EXPORT LOGIC 
-            if (ExportHistory)
+            if (_isManualCsvExportInProgress)
             {
                 ExportCsvData(iStart);
             }
-            else if (IsLastBar)
+
+            if (IsLastBar)
             {
                 SendSocketData(iStart);
             }
@@ -6794,6 +7190,8 @@ namespace cAlgo
 
         protected override void OnTimer()
         {
+            RunSocketHeartbeat();
+
             if (timerHandler.isAsyncLoading)
             {
                 if (!TickObjs.startAsyncLoading) {
@@ -6837,7 +7235,7 @@ namespace cAlgo
                     Second_DrawOnScreen("");
                     timerHandler.isAsyncLoading = false;
                     ClearAndRecalculate();
-                    Timer.Stop();
+                    Timer.Start(TimeSpan.FromSeconds(1));
                 }
             }
         }
